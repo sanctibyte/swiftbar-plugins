@@ -69,12 +69,15 @@ the canonical source; the installed plugin is a build output.
 plugin.template.sh        canonical source, __ICON_*__ placeholders
 gen-icons.sh              rsvg-convert icon renderer
 build.sh                  icons + template -> dist/ (--install to deploy)
-dist/aws-session.5s.sh    the distributable, ~18 KB, committed so it can be downloaded as-is
+dist/aws-session.5s.sh    the distributable, committed so it can be downloaded as-is
 icons/…                   PNG sources for the build (generated, not committed)
 ```
 
 Run `./build.sh --install` after editing the template — editing the installed
 plugin directly means the next build overwrites the change.
+
+The README's icon pictures, `../docs/aws-session-*.png`, are copies of
+`icons/menubar/*.png`. Copy them again if the glyph changes.
 
 ## Portability
 

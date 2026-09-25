@@ -3,11 +3,19 @@
 # without touching the real rc session, tmux server, login or install.
 #
 #   ./test.sh                 tests plugin.template.sh
-#   ./test.sh path/to/plugin  tests another copy
+#   ./test.sh path/to/plugin  tests another copy, e.g. dist/claude-rc.5s.sh
 set -uo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN="${1:-$SRC/plugin.template.sh}"
+
+# The icons as the plugin under test defines them: placeholders in the
+# template, base64 PNGs in a built copy, so the same assertions fit both.
+icon() { sed -n "s/^ICON_$1=\"\(.*\)\"\$/\1/p" "$PLUGIN"; }
+I_GREEN="$(icon GREEN)"; I_AMBER="$(icon AMBER)"; I_RED="$(icon RED)"; I_GREY="$(icon GREY)"
+[[ -n "$I_GREEN" && -n "$I_AMBER" && -n "$I_RED" && -n "$I_GREY" && \
+   "$(printf '%s\n' "$I_GREEN" "$I_AMBER" "$I_RED" "$I_GREY" | sort -u | wc -l)" -eq 4 ]] \
+  || { echo "can't read four distinct icons from $PLUGIN"; exit 1; }
 TMUX_BIN="$(PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" command -v tmux)" || { echo "tmux required"; exit 1; }
 SYS="/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -17,7 +25,10 @@ W="$(cd "$W" && pwd -P)"
 
 # A private tmux server. If the tests were first to start the default server,
 # every real session started later would inherit this throwaway environment.
+# TMUX goes too: inside tmux it names the current server, tmux then ignores
+# TMUX_TMPDIR, and cleanup's kill-server would take that server down.
 export TMUX_TMPDIR="$W/tmux"
+unset TMUX
 # A throwaway HOME keeps ~/.bash_profile out of `bash -lic` and makes the ~
 # label testable.
 export HOME="$W"
@@ -119,15 +130,15 @@ install_claude 2.1.200; logged_in; tags 2.1.100 2.1.200; rc_at 2.1.200
 
 section "missing"
 out="$(CLAUDE_RC_PATH="$W/bin:$SYS" run)"
-has "no tmux: grey"        "| image=__ICON_GREY__" "$out"
+has "no tmux: grey"        "| image=$I_GREY" "$out"
 has "no tmux: message"     "tmux not installed" "$out"
 out="$(CLAUDE_RC_PATH="$W/empty:$(dirname "$TMUX_BIN"):$SYS" run)"
-has "no claude: grey"      "| image=__ICON_GREY__" "$out"
+has "no claude: grey"      "| image=$I_GREY" "$out"
 has "no claude: message"   "claude not found" "$out"
 
 section "stopped"
 out="$(run)"
-has   "grey icon"          "| image=__ICON_GREY__" "$out"
+has   "grey icon"          "| image=$I_GREY" "$out"
 has   "header"             "Claude RC — stopped" "$out"
 has   "start item"         "param1=start" "$out"
 lacks "no stop item"       "param1=stop" "$out"
@@ -175,7 +186,7 @@ section "exited"
 CLAUDE_RC_CMD='sh -c "echo first; echo \"a|b\"; printf \"\\033[31mboom\\033[0m\\n\"; exit 3"' run start >/dev/null
 check "pane dead"             "wait_until dead"
 out="$(run)"
-has   "red icon"              "| image=__ICON_RED__" "$out"
+has   "red icon"              "| image=$I_RED" "$out"
 has   "exit code"             "Claude RC — exited (code 3)" "$out"
 has   "earlier line kept"     "first | font=Menlo" "$out"
 has   "pipe neutralised"      "a¦b | font=Menlo" "$out"
@@ -208,12 +219,106 @@ check "pane dead"             "wait_until dead"
 run clear >/dev/null
 check "session gone"          gone
 
+# --- the rc folder and the settings file ---------------------------------------------
+
+# tmux starts a pane in $HOME when -c names a folder that doesn't exist, so
+# without a check rc would run somewhere other than where the menu says.
+section "rc folder missing → no start"
+out="$(CLAUDE_RC_DIR="$W/nope" run)"
+has   "names the folder"      "Folder not found: ~/nope" "$out"
+has   "says where to set it"  "~/prefs/config" "$out"
+lacks "no start item"         "param1=start" "$out"
+CLAUDE_RC_DIR="$W/nope" run start >/dev/null
+check "start refused"         gone
+run stop >/dev/null
+
+section "rc folder gone after an exit → no restart"
+CLAUDE_RC_CMD='sh -c "exit 1"' run start >/dev/null
+check "pane dead"             "wait_until dead"
+mv "$W/code" "$W/code.away"
+out="$(run)"
+has   "names the folder"      "Folder not found: ~/code" "$out"
+lacks "no restart item"       "param1=restart" "$out"
+has   "clear still offered"   "param1=clear" "$out"
+run restart >/dev/null
+check "restart leaves the dead pane" dead
+mv "$W/code.away" "$W/code"
+run clear >/dev/null
+
+# A restart that can't start rc again must not stop the one that's running.
+section "rc folder gone while running → keeps running"
+run start >/dev/null; wait_until alive
+pid1="$(pane '#{pane_pid}')"
+out="$(CLAUDE_RC_DIR="$W/nope" run)"
+has   "names the folder"      "Folder not found: ~/nope" "$out"
+lacks "no restart item"       "param1=restart" "$out"
+lacks "no restart to apply"   "Settings changed" "$out"
+CLAUDE_RC_DIR="$W/nope" run restart >/dev/null
+check "rc untouched"          'alive && [[ "$(pane "#{pane_pid}")" == "$pid1" ]]'
+run stop >/dev/null
+
+# tmux format-expands -c (#S is the session name), and SwiftBar reads | as the
+# start of a line's parameters.
+section "folder name with # and |"
+mkdir -p "$W/#Sales|q3"
+CLAUDE_RC_DIR="$W/#Sales|q3" run start >/dev/null
+check "pane alive"            "wait_until alive"
+check "runs in that folder"   '[[ "$(pane "#{pane_current_path}")" == "$W/#Sales|q3" ]]'
+has   "shown intact"          "~/#Sales¦q3 · auto ·" "$(CLAUDE_RC_DIR="$W/#Sales|q3" run)"
+run stop >/dev/null
+
+# The file is KEY=value text that is read, never sourced or evaluated: neither
+# the touch line nor the $(…) value may run, and the last RC_DIR wins. The
+# environment still wins over the file, which is how the rest of this suite
+# drives the plugin.
+section "settings file"
+mkdir -p "$W/other dir"
+cat > "$W/prefs/config" <<EOF
+# where rc runs, and how
+RC_DIR=\$(touch "$W/evaluated")
+RC_DIR = "~/other dir"
+RC_CMD='$W/run/2.1.200 --permission-mode plan'
+touch "$W/sourced"
+EOF
+( unset CLAUDE_RC_DIR CLAUDE_RC_CMD; run start >/dev/null )
+check "pane alive"            "wait_until alive"
+check "runs in the file's folder" '[[ "$(pane "#{pane_current_path}")" == "$W/other dir" ]]'
+out="$(unset CLAUDE_RC_DIR CLAUDE_RC_CMD; run)"
+has   "folder and mode shown" "~/other dir · plan · v2.1.200 |" "$out"
+has   "green"                 "| image=$I_GREEN" "$out"
+check "file never run"        '[[ ! -e "$W/sourced" && ! -e "$W/evaluated" ]]'
+
+# The menu shows what rc was started with, not what the file says now.
+section "settings changed while running → restart to apply"
+sed -i '' 's/--permission-mode plan/--permission-mode default/' "$W/prefs/config"
+out="$(unset CLAUDE_RC_DIR CLAUDE_RC_CMD; run)"
+has   "still shows what runs" "~/other dir · plan · v2.1.200 |" "$out"
+has   "says restart"          "Settings changed — restart to apply" "$out"
+has   "amber"                 "| image=$I_AMBER" "$out"
+( unset CLAUDE_RC_DIR CLAUDE_RC_CMD; run restart >/dev/null )
+check "pane alive"            "wait_until alive"
+out="$(unset CLAUDE_RC_DIR CLAUDE_RC_CMD; run)"
+has   "new mode after restart" "~/other dir · default · v2.1.200 |" "$out"
+lacks "nothing left to apply" "Settings changed" "$out"
+tm set-option -wu -t "=$CLAUDE_RC_SESSION:=rc" @rc_dir \; set-option -wu -t "=$CLAUDE_RC_SESSION:=rc" @rc_cmd
+lacks "rc from before 1.1: no claim" "Settings changed" "$(unset CLAUDE_RC_DIR CLAUDE_RC_CMD; run)"
+run stop >/dev/null
+
+section "environment wins over the settings file"
+run start >/dev/null; wait_until alive
+check "RC_DIR from the environment" '[[ "$(pane "#{pane_current_path}")" == "$W/code" ]]'
+out="$(run)"
+has   "RC_CMD from the environment" "~/code · auto · v2.1.200 |" "$out"
+lacks "matches what runs"     "Settings changed" "$out"
+run stop >/dev/null
+rm -f "$W/prefs/config"
+
 # --- versions & auth ------------------------------------------------------------------
 
 section "running, current"
 run start >/dev/null; wait_until alive
 out="$(run)"
-has   "green icon"            "| image=__ICON_GREEN__" "$out"
+has   "green icon"            "| image=$I_GREEN" "$out"
 has   "dir · mode · version"  "~/code · auto · v2.1.200" "$out"
 lacks "no update line"        "Update available" "$out"
 lacks "no update item"        "param1=update" "$out"
@@ -222,7 +327,7 @@ run stop >/dev/null
 section "installed behind latest"
 tags 2.1.100 2.1.300; rc_at 2.1.200; run start >/dev/null; wait_until alive
 out="$(run)"
-has   "amber icon"            "| image=__ICON_AMBER__" "$out"
+has   "amber icon"            "| image=$I_AMBER" "$out"
 has   "update line"           "Update available: 2.1.300" "$out"
 has   "update item"           "Update to 2.1.300 & restart" "$out"
 lacks "no restart-to-apply"   "restart to apply" "$out"
@@ -232,7 +337,7 @@ has   "stopped: plain update" "Update to 2.1.300 |" "$(run)"
 section "running behind installed"
 tags 2.1.100 2.1.200; rc_at 2.1.150; run start >/dev/null; wait_until alive
 out="$(run)"
-has   "amber icon"            "| image=__ICON_AMBER__" "$out"
+has   "amber icon"            "| image=$I_AMBER" "$out"
 has   "running version"       "· v2.1.150" "$out"
 has   "restart to apply"      "Installed 2.1.200 — restart to apply" "$out"
 lacks "no update item"        "param1=update" "$out"
@@ -240,9 +345,9 @@ run stop >/dev/null
 
 section "running version unknown"
 CLAUDE_RC_CMD="sleep 600" run start >/dev/null; wait_until alive
-out="$(run)"
+out="$(CLAUDE_RC_CMD="sleep 600" run)"                 # same settings it started with
 has   "says unknown"          "running version unknown" "$out"
-has   "no guessing: green"    "| image=__ICON_GREEN__" "$out"
+has   "no guessing: green"    "| image=$I_GREEN" "$out"
 run stop >/dev/null
 rc_at 2.1.200
 
@@ -269,22 +374,22 @@ out="$(run)"
 has   "stopped: not logged in" "Not logged in" "$out"
 has   "login item"             "param1=login" "$out"
 run start >/dev/null; wait_until alive
-has   "running + logged out: red" "| image=__ICON_RED__" "$(run)"
+has   "running + logged out: red" "| image=$I_RED" "$(run)"
 echo '{"loggedIn": true}' > "$W/auth.json"                    # no stamp reset: still cached
-has   "cached for 5 min"       "| image=__ICON_RED__" "$(run)"
+has   "cached for 5 min"       "| image=$I_RED" "$(run)"
 logged_in
 out="$(run)"
-has   "green again"            "| image=__ICON_GREEN__" "$out"
+has   "green again"            "| image=$I_GREEN" "$out"
 lacks "no login item"          "param1=login" "$out"
 echo 'garbage' > "$W/auth.json"; rm -f "$W"/state/claude-rc-auth.*
-has   "unknown is not red"     "| image=__ICON_GREEN__" "$(run)"
+has   "unknown is not red"     "| image=$I_GREEN" "$(run)"
 logged_in
 
 section "auth: a failed check keeps the last answer"
 auth_f="$W/state/claude-rc-auth.$(id -u)"
 echo "1 no" > "$auth_f"                                        # expired "no"
 echo 'garbage' > "$W/auth.json"
-has   "garbage: still red"     "| image=__ICON_RED__" "$(run)"
+has   "garbage: still red"     "| image=$I_RED" "$(run)"
 check "garbage: stamp still no" '[[ "$(cut -d" " -f2 "$auth_f")" == no ]]'
 check "retry in ~1 min, not 5"  'ts=$(cut -d" " -f1 "$auth_f"); now=$(date +%s); (( ts < now - 200 && ts > now - 300 ))'
 echo '{"loggedIn": true}' > "$W/auth.json"; touch "$W/auth-slow"
@@ -292,7 +397,7 @@ echo "1 no" > "$auth_f"
 t0=$SECONDS
 out="$(CLAUDE_RC_AUTH_TIMEOUT=1 run)"
 check "slow check cut off"      '(( SECONDS - t0 < 3 ))'
-has   "timeout: still red"     "| image=__ICON_RED__" "$out"
+has   "timeout: still red"     "| image=$I_RED" "$out"
 check "timeout: stamp still no" '[[ "$(cut -d" " -f2 "$auth_f")" == no ]]'
 rm -f "$W/auth-slow"; logged_in
 run stop >/dev/null
@@ -302,7 +407,7 @@ logged_out
 CLAUDE_RC_CMD='sh -c "echo auth expired; exit 1"' run start >/dev/null
 check "pane dead"             "wait_until dead"
 out="$(run)"
-has   "red icon"              "| image=__ICON_RED__" "$out"
+has   "red icon"              "| image=$I_RED" "$out"
 has   "not logged in line"    "Not logged in | color=" "$out"
 has   "login item"            "param1=login" "$out"
 run clear >/dev/null

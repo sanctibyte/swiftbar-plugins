@@ -9,21 +9,38 @@
 #   green    running, logged in, up to date
 #   amber    running, but an update is available, or installed and not yet
 #            applied (restart to pick it up)
-#   red      rc exited (the dead pane is kept so you can read why), or logged out
+#   red      running but logged out, or rc exited (the dead pane is kept so you
+#            can read why)
 #   grey     stopped, or tmux / claude isn't installed
 #
 # Nothing happens without a click: no auto-start, no auto-revive, no
-# auto-update. The reasoning is in DESIGN.md in the source repository.
+# auto-update.
 #
 # REQUIRES
-#   tmux (brew install tmux) and Claude Code (native install) logged in with a
-#   plan that includes Remote Control. The rc directory must already have
-#   accepted Claude's workspace trust dialog (run `claude` there once).
+#   tmux (brew install tmux) and Claude Code (native install) logged in on a
+#   plan that includes Remote Control. Once, in the rc folder: run `claude` to
+#   trust the folder, then `claude remote-control` to answer its one-time
+#   "Enable Remote Control?" question, and Ctrl-C it.
 #
-# <swiftbar.title>Claude RC</swiftbar.title>
-# <swiftbar.version>1.0</swiftbar.version>
-# <swiftbar.desc>Runs `claude remote-control` in tmux and shows whether it is up, current and logged in.</swiftbar.desc>
-# <swiftbar.dependencies>tmux,claude</swiftbar.dependencies>
+# SETTINGS
+#   Optional, in ~/.config/claude-rc/config, which updating this file leaves
+#   alone. KEY=value lines, read as text and never run:
+#     RC_DIR=~/Code                                         where rc runs
+#     RC_CMD=claude remote-control --permission-mode auto   what it runs
+#
+# Instructions, updates and design notes:
+#   https://github.com/sanctibyte/swiftbar-plugins
+#
+# SwiftBar reads the title, version, author, description, dependencies and
+# about link only with the xbar prefix; the swiftbar prefix is for its own
+# options.
+# <xbar.title>Claude RC</xbar.title>
+# <xbar.version>1.1</xbar.version>
+# <xbar.author>Sam Church</xbar.author>
+# <xbar.author.github>sanctibyte</xbar.author.github>
+# <xbar.desc>Runs `claude remote-control` in tmux and shows whether it is up, current and logged in.</xbar.desc>
+# <xbar.dependencies>tmux,claude</xbar.dependencies>
+# <xbar.about>https://github.com/sanctibyte/swiftbar-plugins</xbar.about>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.refreshOnOpen>true</swiftbar.refreshOnOpen>
 
@@ -36,12 +53,34 @@ export LANG="${LANG:-en_US.UTF-8}"
 
 # All overridable, which is also how test.sh drives each state.
 SESSION="${CLAUDE_RC_SESSION:-claude-rc}"
-RC_DIR="${CLAUDE_RC_DIR:-$HOME/Code}"
-RC_CMD="${CLAUDE_RC_CMD:-claude remote-control --permission-mode auto}"
 STATE_DIR="${CLAUDE_RC_STATE_DIR:-${TMPDIR:-/tmp}}"
 PREFS_DIR="${CLAUDE_RC_PREFS_DIR:-$HOME/.config/claude-rc}"
 SETTINGS="${CLAUDE_RC_SETTINGS:-$HOME/.claude/settings.json}"
 DIST_TAGS_URL="${CLAUDE_RC_DIST_TAGS_URL:-https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags}"
+CONFIG="$PREFS_DIR/config"
+
+# The settings file: KEY=value lines, of which only RC_DIR and RC_CMD mean
+# anything. It is read as text, never sourced, so nothing in it runs when the
+# menu renders. The last line for a key wins, and one pair of quotes around a
+# value is dropped.
+_read_config() {
+  local line key val re='^[[:space:]]*(RC_DIR|RC_CMD)[[:space:]]*=(.*)$'
+  [[ -r "$CONFIG" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ $re ]] || continue
+    key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+    val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+    [[ "$val" == \"*\" || "$val" == \'*\' ]] && val="${val:1:${#val}-2}"
+    printf -v "cfg_$key" '%s' "$val"
+  done < "$CONFIG"
+}
+cfg_RC_DIR=""; cfg_RC_CMD=""
+_read_config
+
+# The environment wins, then the settings file, then these defaults.
+RC_DIR="${CLAUDE_RC_DIR:-${cfg_RC_DIR:-$HOME/Code}}"
+[[ "$RC_DIR" == "~" || "$RC_DIR" == "~/"* ]] && RC_DIR="$HOME${RC_DIR#\~}"
+RC_CMD="${CLAUDE_RC_CMD:-${cfg_RC_CMD:-claude remote-control --permission-mode auto}}"
 
 STATE_DIR="${STATE_DIR%/}"
 mkdir -p "$STATE_DIR" 2>/dev/null
@@ -109,6 +148,18 @@ _age() {
 
 _hex() { case "$1" in green) echo "$GREEN" ;; amber) echo "$AMBER" ;; red) echo "$RED" ;; *) echo "$GREY" ;; esac; }
 
+# The --permission-mode value in command line $1, if any.
+_mode() { sed -n 's/.*--permission-mode[ =]\([A-Za-z]*\).*/\1/p' <<<"$1"; }
+
+# $1 with a leading $HOME shown as ~, for display.
+_tilde() { if [[ "$1" == "$HOME" || "$1" == "$HOME"/* ]]; then echo "~${1#"$HOME"}"; else echo "$1"; fi; }
+
+# Shown in place of Start and Restart while RC_DIR doesn't exist. $1 = its label.
+_dir_missing_lines() {
+  echo "Folder not found: $1 | color=$RED"
+  echo "Set RC_DIR in $(_tilde "$CONFIG") | color=$GREY"
+}
+
 # A dropdown item that calls back into this plugin.
 item() { echo "$1 | bash=\"$SELF\" param1=$2 terminal=false refresh=true sfimage=$3"; }
 
@@ -130,15 +181,26 @@ _rc_alive() { local st; st="$(_rc_status)"; [[ -n "$st" && "${st%%|*}" == 0 ]]; 
 
 _start() {
   _rc_alive && return 0
+  # Given a folder that doesn't exist, tmux would quietly start rc in $HOME
+  # while the menu went on naming RC_DIR.
+  [[ -d "$RC_DIR" ]] || return 1
   tmux kill-session -t "=$SESSION" 2>/dev/null   # a dead pane from last time
   # Login + interactive shell, so rc and everything it spawns get the same
   # environment as typing the command in iTerm. exec, so the pane's process is
   # rc itself. remain-on-exit goes on rc's window only, in the same tmux
   # invocation, so an exit leaves the dead pane (code + output) for the menu.
+  # tmux format-expands -c (#S is the session name), hence the doubled #. The
+  # window also records what rc was started with, for the menu: see
+  # _started_with.
   local cmd
   cmd="$(printf '%q ' "${SHELL:-/bin/zsh}" -lic "exec $RC_CMD")"
-  tmux new-session -d -s "$SESSION" -n rc -c "$RC_DIR" "$cmd" \; set-option -w remain-on-exit on
+  tmux new-session -d -s "$SESSION" -n rc -c "${RC_DIR//\#/##}" "$cmd" \; set-option -w remain-on-exit on \
+    \; set-option -w @rc_dir "$RC_DIR" \; set-option -w @rc_cmd "$RC_CMD"
 }
+
+# What the running rc was started with ($1 = @rc_dir or @rc_cmd), as _start
+# recorded it. Empty for an rc started by a version that didn't record it.
+_started_with() { tmux show-options -wqv -t "$RC_PANE" "$1" 2>/dev/null; }
 
 # Ctrl-C first so rc can deregister cleanly; kill the session regardless.
 # In copy mode (someone scrolled back while attached) Ctrl-C would only leave
@@ -156,6 +218,10 @@ _stop() {
   tmux kill-session -t "=$SESSION" 2>/dev/null
   return 0
 }
+
+# Stop, then start, but only when the start can succeed: a restart that
+# can't bring rc back must not stop the one that's running.
+_restart() { [[ -d "$RC_DIR" ]] || return 1; _stop; _start; }
 
 # --- versions & auth -----------------------------------------------------------------
 
@@ -271,7 +337,7 @@ _update_job() {  # $1 = 1 if rc was running when the update was clicked
   before="$(_installed_version)"
   if claude update >"$UPDATE_LOG" 2>&1 && after="$(_installed_version)" && [[ "$after" != "$before" ]]; then
     echo "ok $after" > "$UPDATE_STATUS"
-    [[ "$1" == 1 ]] && _rc_alive && { _stop; _start; }
+    [[ "$1" == 1 ]] && _rc_alive && _restart
   else
     echo "fail" > "$UPDATE_STATUS"
   fi
@@ -360,7 +426,7 @@ case "${1:-}" in
   "")      ;;
   start)   _start ;;
   stop)    _stop ;;
-  restart) _stop; _start ;;
+  restart) _restart ;;
   clear)   tmux kill-session -t "=$SESSION" 2>/dev/null ;;
   update)     _update_spawn ;;
   update-job) _update_job "${2:-0}" ;;
@@ -393,9 +459,8 @@ elif [[ "$dead" == 1 ]];   then state=exited
 else                            state=running
 fi
 
-dir_label="$RC_DIR"
-[[ "$RC_DIR" == "$HOME" || "$RC_DIR" == "$HOME"/* ]] && dir_label="~${RC_DIR#"$HOME"}"
-mode="$(sed -n 's/.*--permission-mode[ =]\([A-Za-z]*\).*/\1/p' <<<"$RC_CMD")"
+dir_label="$(_tilde "$RC_DIR" | _safe)"
+dir_ok=1; [[ -d "$RC_DIR" ]] || dir_ok=""
 
 installed="$(_installed_version)"
 latest="$(_latest_version)"
@@ -403,13 +468,19 @@ update_to=""
 [[ -n "$installed" && -n "$latest" ]] && _ver_lt "$installed" "$latest" && update_to="$latest"
 
 colour=grey; auth=unknown; running_v=""; behind_installed=""
+run_dir=""; run_cmd=""; settings_changed=""
 case "$state" in
   running)
     running_v="$(_running_version "$pid")"
     auth="$(_logged_in)"
+    run_dir="$(_started_with @rc_dir)"; run_cmd="$(_started_with @rc_cmd)"
     [[ -n "$running_v" && -n "$installed" ]] && _ver_lt "$running_v" "$installed" && behind_installed=1
+    # Settings edited since the start apply on a restart. No claim for an rc
+    # that didn't record them, or while a restart couldn't start it anyway.
+    [[ -n "$dir_ok" && -n "$run_dir" && -n "$run_cmd" ]] \
+      && [[ "$run_dir" != "$RC_DIR" || "$run_cmd" != "$RC_CMD" ]] && settings_changed=1
     colour=green
-    [[ -n "$update_to" || -n "$behind_installed" ]] && colour=amber
+    [[ -n "$update_to" || -n "$behind_installed" || -n "$settings_changed" ]] && colour=amber
     [[ "$auth" == no ]] && colour=red
     _reconcile_awake "$pid"
     ;;
@@ -434,19 +505,23 @@ echo "---"
 case "$state" in
   running)
     echo "Claude RC — running · $(_age $(( $(date +%s) - created ))) | color=$(_hex "$colour")"
-    info="$dir_label"
+    # What is running, which differs from the settings until a restart.
+    info="$(_tilde "${run_dir:-$RC_DIR}" | _safe)"
+    mode="$(_mode "${run_cmd:-$RC_CMD}")"
     [[ -n "$mode" ]] && info+=" · $mode"
     if [[ -n "$running_v" ]]; then info+=" · v$running_v"; else info+=" · running version unknown"; fi
     echo "$info | color=$GREY"
     [[ -n "$update_to" ]]        && echo "Update available: $update_to | color=$AMBER"
     [[ -n "$behind_installed" ]] && echo "Installed $installed — restart to apply | color=$AMBER"
+    [[ -n "$settings_changed" ]] && echo "Settings changed — restart to apply | color=$AMBER"
+    [[ -z "$dir_ok" ]]           && _dir_missing_lines "$dir_label"
     [[ "$auth" == no ]]          && echo "Not logged in | color=$RED"
     echo "---"
     item "Attach in $(_term_app)" attach terminal
-    item "Restart" restart arrow.clockwise
+    [[ -n "$dir_ok" ]] && item "Restart" restart arrow.clockwise
     item "Stop" stop stop.fill
     echo "---"
-    _update_lines "Update to $update_to & restart"
+    if [[ -n "$dir_ok" ]]; then _update_lines "Update to $update_to & restart"; else _update_lines "Update to $update_to"; fi
     _awake_line
     [[ "$auth" == no ]]   && item "Log in…" login person.crop.circle
     ;;
@@ -456,19 +531,20 @@ case "$state" in
     tmux capture-pane -p -S - -t "$RC_PANE" 2>/dev/null \
       | grep -v '^[[:space:]]*$' | grep -v '^Pane is dead' | tail -3 | _safe \
       | while IFS= read -r l; do echo "$l | font=Menlo size=11 color=$GREY length=70 symbolize=false"; done
+    [[ -z "$dir_ok" ]] && _dir_missing_lines "$dir_label"
     [[ "$auth" == no ]] && echo "Not logged in | color=$RED"
     echo "---"
-    item "Restart" restart arrow.clockwise
+    [[ -n "$dir_ok" ]] && item "Restart" restart arrow.clockwise
     item "Attach in $(_term_app) (full output)" attach terminal
     item "Clear" clear xmark.circle
     [[ "$auth" == no ]] && item "Log in…" login person.crop.circle
     ;;
   stopped)
     echo "Claude RC — stopped | color=$GREY"
+    [[ -z "$dir_ok" ]] && _dir_missing_lines "$dir_label"
     [[ "$auth" == no ]] && echo "Not logged in | color=$RED"
     echo "---"
-    item "Start" start play.fill
-    echo "---"
+    if [[ -n "$dir_ok" ]]; then item "Start" start play.fill; echo "---"; fi
     _update_lines "Update to $update_to"
     _awake_line
     [[ "$auth" == no ]]   && item "Log in…" login person.crop.circle

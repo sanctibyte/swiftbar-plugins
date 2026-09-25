@@ -17,7 +17,8 @@
 # INSTALL
 #   1. Get SwiftBar if you don't have it:  brew install --cask swiftbar
 #      (or https://swiftbar.app). On first launch it asks you to choose a
-#      plugin folder — any folder will do, e.g. ~/.config/swiftbar/plugins
+#      plugin folder. Make one first, e.g. `mkdir ~/SwiftBar`: the picker
+#      doesn't show hidden folders such as ~/.config.
 #      You can see it later under SwiftBar → Preferences → Plugin Folder.
 #   2. Save this file into that folder, keeping the name aws-session.5s.sh.
 #      The ".5s." is the refresh interval and SwiftBar reads it from the
@@ -46,10 +47,19 @@
 #   this plugin running keeps your credentials rolling. It cannot extend the
 #   12-hour session cap — nothing can — it just means the cache stays warm.
 #
-# <swiftbar.title>AWS Session</swiftbar.title>
-# <swiftbar.version>1.0</swiftbar.version>
-# <swiftbar.desc>Shows whether an `aws login` session is active locally, and lets you re-authenticate.</swiftbar.desc>
-# <swiftbar.dependencies>awscli</swiftbar.dependencies>
+# Instructions, updates and design notes:
+#   https://github.com/sanctibyte/swiftbar-plugins
+#
+# SwiftBar reads the title, version, author, description, dependencies and
+# about link only with the xbar prefix; the swiftbar prefix is for its own
+# options.
+# <xbar.title>AWS Session</xbar.title>
+# <xbar.version>1.0</xbar.version>
+# <xbar.author>Sam Church</xbar.author>
+# <xbar.author.github>sanctibyte</xbar.author.github>
+# <xbar.desc>Shows whether an `aws login` session is active locally, and lets you re-authenticate.</xbar.desc>
+# <xbar.dependencies>awscli</xbar.dependencies>
+# <xbar.about>https://github.com/sanctibyte/swiftbar-plugins</xbar.about>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.refreshOnOpen>true</swiftbar.refreshOnOpen>
 

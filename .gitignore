@@ -1,0 +1,2 @@
+# Build intermediates: gen-icons.sh renders these, build.sh inlines them into dist/
+*/icons/
