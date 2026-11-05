@@ -86,7 +86,8 @@ Everything the plugin needs is on a stock Mac plus the AWS CLI:
 - No `python3`: `sed` extracts `expiresAt`, `TZ=UTC date -j -f` converts it.
   (`python3` is used only by `build.sh`, on the author's machine.)
 - PATH covers `/opt/homebrew/bin` and `/usr/local/bin`, so Intel Macs work.
-- `Log in` opens iTerm when installed, else Terminal.app.
+- `Log in` needs no terminal app: `aws login` runs in the background and opens
+  the default browser.
 - The probe stamp lives in `$TMPDIR`, not in a directory the plugin has to
   create on someone else's machine.
 - `aws` missing entirely reports "AWS CLI not found" rather than a misleading
@@ -114,8 +115,17 @@ rolling 15-minute expiry, and showing it invites reading it as a deadline. No
 "Refresh now" either — the plugin re-runs every 5 seconds and `refreshOnOpen`
 covers opening the menu, so the item was pure decoration.
 
-`Log in` opens an iTerm window running `aws login` so the browser handoff and
-any prompts get a real TTY.
+`Log in` runs `aws login` in the background with no window. The action exits
+only when sign-in finishes, and SwiftBar's `refresh=true` fires only on exit 0,
+so the icon updates at the right moment. A terminal action would refresh as soon
+as the window opened, before sign-in. A second click replaces a sign-in that was
+never finished.
+
+stdin is `/dev/null`, so a CLI prompt (no region on the profile, or signing in as
+a different identity) fails rather than hanging. A failure raises a notification
+that opens `/tmp/swiftbar-aws-login.log`. SwiftBar's URL scheme finds a plugin by
+the part of its file name before the first dot (`aws-session`), and silently
+ignores the full file name.
 
 ## Testability
 

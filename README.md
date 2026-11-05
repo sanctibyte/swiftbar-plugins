@@ -228,7 +228,12 @@ into the plugin folder by hand. To update it later, run the same command again.
 
 ### Using it
 
-**Log in…** in the menu opens iTerm (or Terminal) running `aws login`.
+**Log in…** in the menu runs `aws login` in the background. Your browser opens,
+and the cloud updates once you finish signing in. If sign-in fails, you get a
+notification that opens the log, so allow SwiftBar's notifications when macOS
+asks. A sign-in that needs an answer, such as a profile with no region or a
+different identity from the one it holds, fails this way; run `aws login` in a
+terminal to answer it.
 
 The plugin reads only `expiresAt` and `accountId` from the login cache in
 `~/.aws/login/cache/`, never your keys. Once the cached credentials have

@@ -133,36 +133,25 @@ _probe() {
 
 # --- the `Log in` action ------------------------------------------------------
 
-# `aws login` hands off to a browser and can prompt, so give it a real terminal.
-# iTerm if it's installed, otherwise Terminal.app, which every Mac has.
-_open_login() {
-  if [[ -d "/Applications/iTerm.app" ]]; then
-    /usr/bin/osascript <<'OSA'
-tell application "iTerm"
-  activate
-  set newWindow to (create window with default profile)
-  tell current session of newWindow
-    write text "aws login"
-  end tell
-end tell
-OSA
-  else
-    /usr/bin/osascript <<'OSA'
-tell application "Terminal"
-  activate
-  do script "aws login"
-end tell
-OSA
-  fi
-}
+LOG=/tmp/swiftbar-aws-login.log
+PLUGIN="$(basename "$SELF")"
+PLUGIN="${PLUGIN%%.*}"   # SwiftBar knows a plugin by the file name's part before the first dot
 
+# `aws login` opens the browser itself and waits for it to come back, so it runs
+# here with no window. SwiftBar refreshes only once this exits 0, so the menu bar
+# updates when sign-in finishes. With no stdin, a CLI prompt fails instead of hanging.
 if [[ "${1:-}" == "login" ]]; then
-  _open_login
+  AWS="$(command -v aws)" || exit 1   # an empty path would make pkill match any " login"
+  pkill -f "$AWS login"   # a sign-in from an earlier click that was never finished
+  "$AWS" login </dev/null >"$LOG" 2>&1
+  status=$?
   # Any cached "fail" is now stale — drop it so the menu bar doesn't stay red
   # for up to a minute after a successful sign-in.
   rm -f "$PROBE_STAMP"
-  echo "Opening a terminal — finish the sign-in there."
-  exit 0
+  if (( status != 0 && status != 143 )); then   # 143: replaced by a newer click
+    open -g "swiftbar://notify?plugin=$PLUGIN&title=AWS%20sign-in%20failed&body=Click%20to%20see%20why&href=file://$LOG"
+  fi
+  exit "$status"
 fi
 
 # --- state --------------------------------------------------------------------
